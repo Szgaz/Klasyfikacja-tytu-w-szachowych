@@ -1,0 +1,1649 @@
+---
+title: "Klasyfikacja tytułów szachowych graczy na podstawie rankingów w różnych trybach gry"
+author: "Szymon Gazdowicz"
+editor: visual
+editor_options: 
+  chunk_output_type: inline
+format:
+  html:
+    toc: true
+    toc-location: left
+    toc-title: Spis treści
+    toc-depth: 2
+    warning: false
+    message: false
+    echo: true
+    self-contained: true
+
+output:
+  html_document:
+    fig_width: 30
+---
+
+## **Wstęp**
+
+W niniejszym projekcie zajmuje się budową optymalnego modelu uczenia maszynowego, który będzie służył do klasyfikacji tytułów szachowych graczy na podstawie ich rankingów w różnych trybach gry (standardowym, rapid i blitz). Zadanie to realizuję w języku programowania R.
+
+## **Cel Projektu**
+
+Celem projektu jest stworzenie i porównanie różnych modeli klasyfikacyjnych, które będą przewidywać tytuł szachowy gracza (np. Grand Master, International Master) na podstawie jego rankingów oraz płci.
+
+## **Źródło Danych**
+
+Dane wykorzystane w projekcie pochodzą z bazy danych FIDE (Międzynarodowej Federacji Szachowej).
+
+![](FIDE-Tile.webp){fig-align="center"}
+
+Strona Internetowa: <https://ratings.fide.com/download_lists.phtml>
+
+Zbiór danych zawiera informacje o rankingach graczy w trzech różnych trybach gry: standardowym, rapid i blitz, a także dodatkowe atrybuty takie jak liczba rozegranych partii, rok urodzenia, płeć, federacja, tytuł i inne.
+
+### **Używane biblioteki:**
+
+```{r}
+library(readxl)
+library(tidyverse)
+library(car)
+library(mice)
+library(rpart)
+library(tidyverse) 
+library(rpart) 
+library(rpart.plot) 
+library(doParallel)
+library(flextable)
+library(ISLR)
+library(tidymodels)
+library(e1071) 
+library(caTools) 
+library(class)
+library(corrr)
+library(caret)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(DT)
+library(plotly)
+library(e1071) 
+library(scales)
+library(rsample)
+```
+
+# **Przygotowanie danych**:
+
+### **Wczytanie danych**
+
+```{r}
+registerDoParallel(cores = 4)
+dane1 <- read_excel("dane_word.xlsx")
+
+```
+
+```{r}
+dane2 <- read_excel("dane_word_2.xlsx")
+```
+
+```{r}
+dane_przed=rbind(dane1,dane2)
+```
+
+### **Filtrowanie brakujących tytułów**
+
+Usunąłem wiersze, które nie zawierają informacji o tytule `Tit`. Gracze bez tytułu nie są istotni dla mojej analizy, dlatego usunięto wiersze, w których brakowało tej informacji było ich blisko 1.4mln.
+
+### **Usunięcie niepotrzebnych kolumn**
+
+Wybrałem konkretne kolumny do usunięcia, które nie są istotne dla analizy lub modelowania. Kolumny, takie jak `WTit`, `OTit`, `FOA`, `SGm`, `SK`, `RGm`, `Rk`, `BGm`, `Flag`, `BK`, `ID Number`, zostały usunięte, ponieważ zawierają dużo brakujących danych lub nie są istotne dla badanego problem.
+
+```{r}
+sapply(dane_przed,function(x)sum(is.na(x)))
+```
+
+```{r}
+dane_tytuł <-  dane_przed  %>% 
+  filter(!is.na(Tit)) %>%
+  select(-WTit, -OTit, -FOA, -SGm, -SK, -RGm, -Rk, -BGm, -Flag,-BK ,-`ID Number`)
+
+
+```
+
+### **Przedstawienie danych**
+
+```{r}
+datatable(dane_tytuł, 
+          filter = "top", 
+          options = list(pageLength = 10), 
+          rownames = FALSE)
+```
+
+1.  **NAME** - Imię i nazwisko gracza: Pełne imię i nazwisko gracza.
+
+2.  **FED** - Federacja gracza: Krajowa federacja szachowa, do której należy gracz.
+
+3.  **SEX** - Płeć gracza: Płeć gracza, mężczyzna (M) lub kobieta (F).
+
+4.  **TIT** - Tytuł gracza: Tytuł szachowy gracza,
+
+    **Dla mężczyzn:**
+
+    1.  GM - Arcymistrz
+
+    2.  IM - Mistrz Międzynarodowy
+
+    3.  FM - Mistrz FIDE
+
+    4.  CM - Mistrz Kandydacki
+
+    **Dla kobiet:**
+
+    1.  WGM - Arcymistrzyni
+
+    2.  WIM - Mistrzyni Międzynarodowa
+
+    3.  WFM - Mistrzyni FIDE
+
+    4.  WCM - Mistrzyni Kandydacka
+
+        ```{r}
+        unique(dane_tytuł$Tit)
+        ```
+
+5.  **SRTNG** - Standard rating: Średnia ocena gracza w standardowych (klasycznych) grach szachowych
+
+6.  **RRTNG** - Rapid rating: Średnia ocena gracza w szybkich grach szachowych.
+
+7.  **BRTNG** - Blitz rating: Średnia ocena gracza w błyskawicznych grach szachowych.
+
+8.  **B-day** - Rok urodzenia gracza
+
+W jednym przypadku w naszym zbiorze danych wystąpił tytuł `WH`, co jest honorowym tytułem arcymistrzyni. Aby lepiej odzwierciedlić tę rangę w środowisku szachowym, zdecydowałem się na zmianę tego tytułu na `WGM` . Ta zmiana pozwoli zachować spójność i jasność interpretacji danych, uwzględniając konwencje przyjęte w Międzynarodowej Federacji Szachowej (FIDE).
+
+```{r}
+dane_tytuł <- mutate(dane_tytuł, Tit = ifelse(Tit == "WH", "WGM", Tit))
+```
+
+### **Analiza korelacji**
+
+**Analiza korelacji** to metoda statystyczna oceniająca siłę i kierunek związku między dwiema zmiennymi. Współczynnik korelacji, przyjmujący wartości od `-1` do `1`,wskazuje, czy zmienne są dodatnio, ujemnie, czy w ogóle nieskorelowane.
+
+#### **Analiza macierzy korelacji dla wybranych zmiennych numerycznych**
+
+```{r}
+dane_tytuł %>%
+  select(where(is.numeric)) %>%
+  correlate() %>%
+  rplot(., print_cor = T)
+```
+
+### **Opis Działania Korelacji**
+
+1.  **SRtng (Standard Rating)**:
+
+    -   Wysoka pozytywna korelacja z **`RRtng`** (0.920) i **`BRtng`** (0.916).
+
+    -   Bardzo niska, praktycznie zerowa korelacja z **`B-day`** (-0.002).
+
+2.  **RRtng (Rapid Rating)**:
+
+    -   Wysoka pozytywna korelacja z **`SRtng`** (0.920) i **`BRtng`** (0.944).
+
+    -   Bardzo niska, praktycznie zerowa korelacja z **`B-day`** (-0.011).
+
+3.  **BRtng (Blitz Rating)**:
+
+    -   Wysoka pozytywna korelacja z **`SRtng`** (0.916) i **`RRtng`** (0.944).
+
+    -   Bardzo niska, praktycznie zerowa korelacja z **`B-day`** (-0.014).
+
+**B-day (Birth Year)**:
+
+-   Bardzo niska, praktycznie zerowa korelacja z pozostałymi zmiennymi: **`SRtng`** (-0.002), **`RRtng`** (-0.011), i **`BRtng`** (-0.014).
+
+### **Wnioski**
+
+1.  **Silne korelacje**:
+
+    -   Rankingi w różnych trybach gry (Standard, Rapid, Blitz) są ze sobą bardzo silnie skorelowane, co sugeruje, że zawodnicy utrzymują zbliżony poziom we wszystkich trybach gry.
+
+2.  **Niskie korelacje**:
+
+    -   Rok urodzenia (**`B-day`**) wykazuje bardzo niską, praktycznie zerową korelację z wszystkimi typami rankingów, co wskazuje, że wiek zawodnika ma minimalny wpływ na jego ranking w szachach.
+
+### **Zastępowanie braków danych**
+
+W ramach analizy danych obliczam średnie wartości dla każdego tytułu mistrzowskiego `GM`, `IM`, `WGM`, itp.. Celem tego działania jest uzupełnienie brakujących wartości w zbiorze danych dotyczącym szachistów, aby zachować kompletność danych i umożliwić dalszą analizę. Działanie to ma na celu zachowanie spójności w danych oraz przygotowanie ich do dalszej analizy i modelowania, eliminując potencjalne zakłócenia wynikające z braków danych.
+
+```{r}
+sapply(dane_tytuł,function(x)sum(is.na(x)))
+```
+
+```{r}
+sredni_ranking <- dane_tytuł %>%
+  group_by(Tit,Sex) %>%
+  summarise(mean_SRtng = round(mean(SRtng, na.rm = TRUE),0),
+            mean_RRtng = round(mean(RRtng, na.rm = TRUE),0),
+            mean_BRtng = round(mean(BRtng, na.rm = TRUE),0)) %>% arrange(desc(mean_SRtng))
+sredni_ranking 
+```
+
+Podczas analizy danych szachistów zauwazyłem, że wartości w kolumnie *Sex* nie zawsze odzwierciedlają rzeczywistą płeć szachistów. W związku z tym, postawiłem warunek, że jeśli szachista posiada tytuł *GM*, *IM*, *FM* lub *CM* , to automatycznie jego płeć powinna być ustalana jako *M* (mężczyzna)
+
+```{r}
+dane_tytuł <- dane_tytuł %>%
+  mutate(Sex = ifelse(Tit %in% c("GM", "IM", "FM", "CM"), "M", Sex)) %>%
+  mutate(Sex = ifelse(Tit %in% c("WGM", "WIM", "WFM", "WCM"), "F", Sex))
+dane_tytuł
+```
+
+```{r}
+sredni_ranking <- dane_tytuł %>%
+  group_by(Tit,Sex) %>%
+  summarise(mean_SRtng = round(mean(SRtng, na.rm = TRUE),0),
+            mean_RRtng = round(mean(RRtng, na.rm = TRUE),0),
+            mean_BRtng = round(mean(BRtng, na.rm = TRUE),0)) %>% arrange(desc(mean_SRtng))
+sredni_ranking 
+```
+
+# 
+
+```{r}
+ggplot(data = sredni_ranking, aes(x = reorder(Tit,-mean_SRtng), y = mean_SRtng, fill = Sex)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Średnie rankingi szachistów w różnych kategoriach tytułów",
+       x = "Kategoria tytułu",
+       y = "Średni ranking",
+       fill = "Płeć") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+W tabeli oraz wykresie pokazano średnie rankingi szachistów w różnych kategoriach tytułów. Zauważalna jest różnica między średnimi rankingami mężczyzn `GM`, `IM`, `FM`, `CM` i kobiet `WGM`, `WIM`, `WFM`, `WCM`. Mężczyźni zazwyczaj mają wyższe rankingi niż kobiety, co może być spowodowane różnicami w strukturze kategorii oraz w poziomie szachowym między płciami.
+
+## **Uzupełnienie danych**
+
+Średnie te następnie używam do uzupełnienia brakujących wartości w danych, które pojawiły się w konkretnych obserwacjach.
+
+```{r}
+dane_uzupełnione <- dane_tytuł %>%
+  left_join(sredni_ranking, by = "Tit")%>%
+  mutate(SRtng = ifelse(is.na(SRtng), mean_SRtng, SRtng),
+         RRtng = ifelse(is.na(RRtng), mean_RRtng, RRtng),
+         BRtng = ifelse(is.na(BRtng), mean_BRtng, BRtng)) %>% 
+  select(-mean_SRtng, -mean_RRtng, -mean_BRtng)
+dane_uzupełnione
+```
+
+```{r}
+sapply(dane_uzupełnione,function(x)sum(is.na(x)))
+```
+
+## **Podstawowe statystki**
+
+```{r}
+summary(dane_uzupełnione[, c("SRtng", "RRtng", "BRtng", "B-day")])
+```
+
+-   Wartość minimalna dla **`SRtng`** wynosi 0, co wskazuje na wystąpienie brakujących danych lub błędu w danych.
+
+-   **`B-day`** Podobnie, minimalna wartość to 0, co jest nieprawidłowe dla daty urodzenia.
+
+-   Pozostałe zmienne **`RRtng`**, **`BRtng`** mają wartości zgodne z oczekiwanymi zakresami dla rankingów szachowych.
+
+### **Zamiana wartości 0 w SRtng**
+
+Konieczne będzie zastąpienie wartości 0 w kolumnie **`SRtng`** odpowiednią wartością średniej dla danej kategorii zawodnika.
+
+```{r}
+dane_uzupełnione <- dane_uzupełnione %>% 
+  group_by(Tit) %>%
+  mutate(SRtng = ifelse(SRtng == 0, mean(SRtng, na.rm = TRUE), SRtng))
+```
+
+### **Poprawa wartości 0 w B-day**
+
+Aby poprawić jakość danych, będę musiał usunąć obserwacje, w których wartość kolumny **`B-day`** wynosi 0. Nie byłem w stanie zastąpić tej wartości innymi danymi, dlatego usuwam te rekordy, aby zapewnić spójność i poprawność danych do dalszej analizie.
+
+```{r}
+dane_uzupełnione <- dane_uzupełnione %>%
+  filter(`B-day` != 0)
+```
+
+```{r}
+dane_uzupełnione=subset(dane_uzupełnione, select = -Sex.y)
+```
+
+```{r}
+summary(dane_uzupełnione[, c("SRtng", "RRtng", "BRtng", "B-day")])
+```
+
+### **Rankingi Szachowe (SRtng, RRtng, BRtng)**
+
+-   Minimalne wartości rankingów szachowych wynoszą odpowiednio `1409 SRtn`, `1433 RRtng` i `1455 BRtng`.
+
+-   Średnie wartości rankingów są zbliżone do `2200 dla SRtng`, `2170 dla RRtng` i `2165 dla BRtng`.
+
+-   Najwyższe osiągnięte wartości to `2830 SRtng`, `2823 RRtng` i `2886 BRtng`, co wskazuje na duży zakres różnic między najlepszymi a najniższymi rankingami.
+
+### **Data Urodzenia (B-day)**
+
+-   Po usunięciu rekordów z wartością 0, minimalna wartość daty urodzenia wynosi 1920 roku, a maksymalna to 2015 rok .
+
+```{r}
+dane_uzupełnione[which.max(dane_uzupełnione$`B-day`),]
+```
+
+Romi Milner to najmłodsza szachistka z tytułem Woman Candidate Master (WCM). Urodziła się w 2015 roku i reprezentuje Stany Zjednoczone. Obecnie jej ranking FIDE wynosi 1803 w standardzie, 1801 w szachach szybkich oraz 1722 w szachach błyskawicznych.
+
+![](Romi.jpg){fig-align="center"}
+
+### **Rozkład tytułów szachowych w różnych federacjach**
+
+```{r}
+wykres_interaktywny <-ggplot(dane_uzupełnione, aes(x = Fed, fill = Tit)) +
+  geom_bar(position = "stack") +
+  xlab("Federacja") +
+  ylab("Liczba zawodników") +
+  ggtitle("Rozkład tytułów szachowych w różnych federacjach")
+ggplotly(wykres_interaktywny)
+```
+
+Wykres słupkowy przedstawiający rozkład tytułów szachowych w różnych federacjach. Oś X reprezentuje poszczególne federacje, natomiast oś Y przedstawia liczbę zawodników. Każdy kolor na wykresie reprezentuje inny tytuł szachowy.
+
+Analiza tego wykresu może być utrudniona ze względu na dużą ilość federacji, co prowadzi do zatłoczenia i utraty czytelności.
+
+Stąd też, zdecydowano się ograniczyć prezentację tylko do 20 najbardziej licznych federacji
+
+```{r}
+
+liczba_zawodnikow <- dane_uzupełnione %>%
+  count(Fed) %>%
+  arrange(desc(n))
+
+
+najliczniejsze_federacje <- liczba_zawodnikow$Fed[1:20]
+
+dane_ograniczone <- dane_uzupełnione %>%
+  filter(Fed %in% najliczniejsze_federacje)
+
+wykres_interaktywny2 <- ggplot(dane_ograniczone, aes(x = Fed, fill = Tit)) +
+  geom_bar(position = "stack") +
+  xlab("Federacja") +
+  ylab("Liczba zawodników") +
+  ggtitle("Rozkład tytułów szachowych w 20 najliczniejszych federacjach")
+
+ ggplotly(wykres_interaktywny2)
+
+```
+
+Wykres słupkowy przedstawiający rozkład tytułów szachowych w 20 najliczniejszych federacjach został dokładnie przeanalizowany. Spośród tych federacji najliczniejszą jest Rosja, która posiada imponującą liczbę szachistów posiadających różne tytuły. Szczegółowe dane przedstawiają się następująco:
+
+-   **Rosja (RUS):**
+
+    -   `62` Grandmasterów (GM)
+
+    -   `1209` FIDE Masterów (FM)
+
+    -   `183` International Masterów (IM)
+
+    -   `482` Candidate Masterów (CM)
+
+    -   `382` Woman FIDE Masterów (WFM)
+
+    -   `56` Candidate Masterów (CM)
+
+    -   `98` Woman International Masterów (WIM)
+
+    -   `33` Woman Candidate Masterów (WCM)
+
+    -   `41` Woman Grandmasterów (WGM)
+
+To imponujące zestawienie potwierdza dominację Rosji w światowej szachowej społeczności oraz bogactwo talentów szachowych w tej federacji. Analiza pozwala zrozumieć znaczenie Rosji jako potęgi szachowej na arenie międzynarodowej.
+
+### **Analiza zależności między wiekiem a rankingiem**
+
+```{r}
+ggplot(dane_uzupełnione, aes(x = `B-day`, y = SRtng)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  xlab("Rok urodzenia") +
+  ylab("Standard Rating(SRtng)") +
+  ggtitle("Zależność między wiekiem a Standard Rating")
+```
+
+Wykres przedstawia zależność między wiekiem a rankingiem szachowym. Na osi X znajduje się rok urodzenia, a na osi Y wartość Standard Rating. Wydaje się, że nie ma wyraźnej korelacji między wiekiem a rankingiem. Linia niebieska, reprezentująca trend regresji liniowej, jest stosunkowo płaska na całym zakresie lat, co sugeruje, że wiek nie ma znaczącego wpływu na umiejętności szachowe, jak wskazuje ranking.
+
+# **Uczenie maszynowe**
+
+### **Zmiana typów danych w danych wejściowych**
+
+```{r}
+dane=dane_uzupełnione
+dane$Tit <- as.factor(dane$Tit)
+dane$SRtng <- as.numeric(dane$SRtng)
+dane$RRtng <- as.numeric(dane$RRtng)
+dane$BRtng <- as.numeric(dane$BRtng)
+dane$Sex.x <- as.factor(dane$Sex.x)
+```
+
+Dokonano konwersji typów danych w poszczególnych kolumnach danych wejściowych zgodnie z poniższymi wytycznymi:
+
+1.  **Tit**: Zmieniono typ danych na **`factor`**.
+
+    -   Kolumna reprezentuje tytuł szachowy gracza, co stanowi zmienną kategoryczną wymagającą typu **`factor`** dla poprawnej analizy i modelowania.
+
+2.  **SRtng,RRtng,BRtng**: Zmieniono typ danych na **`numeric`**.
+
+    -   Kolumny reprezentuje cenę graczy w szachach, co wymaga typu **`numeric`** dla możliwości przeprowadzania operacji numerycznych.
+
+3.  **Sex.x**: Zmieniono typ danych na **`factor`**.
+
+    -   Kolumna reprezentuje informację o płci gracza, co stanowi zmienną kategoryczną wymagającą typu **`factor`** dla poprawnej analizy i modelowania. Przekształcenie na typ **`factor`** umożliwia wygodne kodowanie płci jako wartości kategorycznych.
+
+## **Podział danych na zbiór treningowy i testowy**
+
+```{r}
+
+set.seed(2024)# Ustawienie ziarna losowego dla powtarzalności
+split <- initial_split(dane,0.7)
+train <- training(split)
+test <- testing(split)
+```
+
+**`initial_split(dane, 0.7)`**: Dzieli dane na zbiór treningowy (**`train`**) i testowy (**`test`**) w proporcji 70/30.
+
+## **Drzewo decyzyjne(Decision Tree)- pakiet `rpart`**
+
+![Drzewo decyzyjne](drzewo_decyzyjne.jpg){fig-align="center" width="400"}
+
+### **Definicja Modelu**
+
+```{r}
+mod.rpart <- rpart(Tit~SRtng+RRtng+BRtng+Sex.x, data =train, 
+                   control = rpart.control(minsplit = 20,
+                                           minbucket = 20,
+                                           maxdepth = 10))
+```
+
+Model drzewa decyzyjnego (**`rpart`**) dla klasyfikacji zmiennej **`Tit`** względem zmiennych **`SRtng`**, **`RRtng`**, **`BRtng`** i **`Sex.x`** na podstawie danych treningowych **`dt.train`** dokonujemy za pomocą funkcji `rpart` pakietu **rpart** stosując zapis formuły zależności. Drzewo zostanie zbudowane z uwzględnieniem kilku kryteriów zatrzymania:
+
+-   minimalna liczebność węzła, który może zostać podzielony to **20** - ze względu na duzą liczebność zbioru uczącego;
+
+-   minimalna liczebność liścia to **20** - aby nie dopuścić do przeuczenia modelu;
+
+-   maksymalna głębokość drzewa to **10** - aby nie dopuścić do przeuczenia modelu.
+
+### **Wykres drzewa decyzyjnego**
+
+Funkcja **`rpart.plot(mod.rpart)`** generuje czytelny wykres drzewa decyzyjnego, który ułatwia zrozumienie struktury i sposobu działania modelu **`mod.rpart`**. Pozwala to na wizualną analizę reguł decyzyjnych oraz podziałów danych, co może być przydatne w interpretacji działania modelu i jego skuteczności.
+
+```{r}
+rpart.plot(mod.rpart)
+```
+
+1.  **Analiza ścieżek**
+
+    -   Dla graczy płci męskiej (`Sex.x` = M):
+
+        -   Jeśli `RRtng` \< **2301**, istnieje **81%** szansy, że zostaną sklasyfikowani jako **FM**.
+
+            -   Jeśli `RRtng` \< **2035**, to nadal jest **56%** szansy, że pozostaną **FM**; w przeciwnym razie:
+
+                -   **CM** z **10%** prawdopodobieństwem,
+
+                -   **FM** z **46%** prawdopodobieństwem,
+
+                -   **GM** z **7%** prawdopodobieństwem.
+
+        -   Jeśli `RRtng` \>= **2301**, ale \< **2441**, zostaną sklasyfikowani jako **IM** z **25%** szansą.
+
+            -   Dalsze klasyfikacje obejmują **IM** **18%** i **GM** **13%**, jeśli `RRtng` \>= 2441.
+
+    -   Dla graczy niebędących mężczyznami(`Sex.x` = F):
+
+        -   Jeśli `RRtng` \< **1858**, istnieje **5%** szansy, że zostaną sklasyfikowani jako **WCM**.
+
+            -   Jeśli `RRtng` \>**1859** istnieje **15%** szansy, że zostaną sklasyfikowani jako **WFM**.
+
+                -   Jeśli `RRtng` \>= **2062,** istnieją dwie ścieżki:
+
+                    -   **WFM** z około **10%** prawdopodobieństwa,
+
+                    -   **WIM** z około **5%** prawdopodobieństwa.
+
+### **Wyjaśnienie predykcji prawdopodobieństw dla nowych danych**
+
+```{r}
+pred.prob <- predict(mod.rpart, 
+                     newdata =test)
+
+```
+
+**`predict(mod.rpart, newdata = dt.test)`** wykonuje predykcję prawdopodobieństw klas dla nowych danych **`dt.test`** przy użyciu wcześniej wytrenowanego modelu **`mod.rpart`**.
+
+### **Predykcja klas dla nowych danych**
+
+```{r}
+pred.class <- predict(mod.rpart, 
+                      newdata = test,
+                      type = "class")
+```
+
+**`predict(mod.rpart, newdata = test, type = "class")`** wykonuje predykcję klas dla nowych danych **`test`** przy użyciu wcześniej wytrenowanego modelu **`mod.rpart`**.
+
+```{r}
+
+pred_drzewo <- cbind(test,pred.class)
+names(pred_drzewo)[9] <- ".pred_class"
+tab <- confusionMatrix(data=pred_drzewo$.pred_class, reference = pred_drzewo$Tit)
+
+
+```
+
+### **Macierz Pomyłek**
+
+```{r}
+tab$table
+```
+
+***Macierz pomyłek*** jest narzędziem używanym do oceny skuteczności klasyfikatora w problemach klasyfikacji. Przedstawia ona liczbę poprawnych i błędnych klasyfikacji dla każdej klasy. Pomaga zidentyfikować, które klasy są często mylone między sobą przez klasyfikator oraz ocenia jego ogólną skuteczność.
+
+**W tej macierzy:**
+
+-   Wiersze reprezentują przewidywane klasy (`Prediction`).
+
+-   Kolumny reprezentują rzeczywiste klasy (`Reference`).
+
+-   Wartości w macierzy to liczba przypadków, które zostały zaklasyfikowane do danej kombinacji przewidywanej i rzeczywistej klasy.
+
+**Na przykład:**
+
+-   **498** przypadków zostało zaklasyfikowanych jako **CM** (`Prediction`) i rzeczywiście należały do klasy `CM` (`Reference`).
+
+-   **340** przypadków zostało zaklasyfikowanych jako FM (Prediction), ale rzeczywiście należały do klasy `IM` (`Reference`).
+
+### **Statystyki Ogólne**
+
+```{r}
+tab$overall
+```
+
+1.  **Dokładność (Accuracy):** 75.1%
+
+    -   Oznacza to, że model poprawnie sklasyfikował **75.1%** wszystkich przypadków na zbiorze testowym. Jest to ogólna miara skuteczności modelu w przewidywaniu odpowiednich klas na podstawie danych testowych
+
+```{r}
+        accuracy_tab <- round(sum(diag(tab$table))/sum(tab$table)*100,1)
+        accuracy_tab
+```
+
+2.  **Miara zgodności (Kappa):** 0.6657
+
+    -   **Kappa** wynosi **0.6657**, co sugeruje umiarkowaną zgodność między klasyfikacją modelu a rzeczywistymi danymi.
+
+3.  **Dolny zakres przedziału ufności dla dokładności (Accuracy Lower):** 0.7401
+
+    -   Dolny zakres przedziału ufności dla dokładności wynosi **0.7401**.
+
+4.  **Górny zakres przedziału ufności dla dokładności (Accuracy Upper):** 0.7615
+
+    -   Górny zakres przedziału ufności dla dokładności wynosi **0.7615.**
+
+5.  **Dokładność dla klasyfikatora losowego (Accuracy Null):** 0.4163
+
+    -   Dokładność dla klasyfikatora losowego, czyli sytuacji, gdy klasyfikator przewiduje losowe wartości, wynosi **0.4163**.
+
+6.  **Wartość P dla dokładności (Accuracy P-Value):** 0.0000000...
+
+    -   Wartość P dla dokładności wynosi **0.0000000...**, co oznacza, że dokładność jest statystycznie istotna.
+
+7.  **Wartość P dla testu Mcnemara (Mcnemar P-Value):** NaN
+
+    -   Wartość P dla testu Mcnemara nie jest dostępna.
+
+### **Sprawdzenie konieczności przycięcia drzewa**
+
+W dalszej kolejności sprawdzimy, czy nie jest konieczne przycięcie drzewa.
+
+```{r}
+printcp(mod.rpart)
+```
+
+```{r}
+plotcp(mod.rpart)
+```
+
+Jednym z kryteriów przycinania drzewa jest przycinanie ze względu na złożoność drzewa. W tym przypadku jest wyrażony parametrem `cp`. Istnieje powszechnie stosowana reguła jednego odchylenia standardowego, która mówi, że drzewo należy przyciąć wówczas, gdy błąd oszacowany na podstawie sprawdzianu krzyżowego (`xerror`), pierwszy raz zejdzie poniżej poziomu wyznaczonego przez najniższą wartość błędu powiększonego o odchylenie standardowe tego błędu (`xstd`). Na podstawie poniższej tabeli można ustalić, że poziomem odcięcia jest wartość **`0.41819+0.00602=0.42421`** Pierwszy raz błąd przyjmuje wartość mniejszą od **`0.41819`** po szóstym podziale (`nsplit=6`). Temu poziomowi odpowiada `cp` o wartości **`0.0100`** i to jest złożoność drzewa, którą powinniśmy przyjąć do przycięcia drzewa.
+
+### **Przyciete Drzewo decyzyjne**
+
+```{r}
+mod.rpart2 <- rpart::prune(mod.rpart, cp=0.01)
+```
+
+```{r}
+rpart.plot(mod.rpart2)
+```
+
+### **Ocena dopasowania modelu**
+
+Na koniec budowy modelu należy sprawdzić jego jakość na zbiorze testowym.
+
+```{r}
+pred.class2 <- predict(mod.rpart2,
+                       newdata = test,
+                       type = "class")
+
+
+pred_drzewo2 <- cbind(test,pred.class2)
+names(pred_drzewo2)[9] <- ".pred_class"
+tab2 <- confusionMatrix(data=pred_drzewo2$.pred_class, reference = pred_drzewo2$Tit)
+tab2$table
+
+```
+
+Mimo przycięcia drzewa, klasyfikacja pozostaje na niezmienionym poziomie.
+
+Odsetek poprawnych klasyfikacji możemy oszacować za pomocą
+
+```{r}
+accuracy_tab2 <-  round(sum(diag(tab2$table))/sum(tab2$table)*100,1)
+accuracy_tab2
+```
+
+### **Przygotowanie receptury (`recipe`)**
+
+```{r}
+rec <- recipe(Tit~SRtng+RRtng+BRtng+Sex.x,data=train) %>%    step_dummy(all_factor_predictors())
+```
+
+-   **`recipe(Tit ~ SRtng + RRtng + BRtng + Sex.x, data = train)`**: Tworzy receptę do przetwarzania danych.
+
+-   **`step_dummy(all_factor_predictors())`**: Przekształca zmienne kategoryczne na zmienne binarne.
+
+## **Drzewo decyzyjne(Decision Tree)-pakiet `parsnip`**
+
+**Drzewo decyzyjne** jest prostym modelem uczenia maszynowego, który działa na zasadzie podejmowania sekwencyjnych decyzji w formie hierarchicznej struktury drzewa. Oto kluczowe cechy drzewa decyzyjnego:
+
+1.  **Struktura Hierarchiczna:** Drzewo decyzyjne składa się z węzłów (nodes) i krawędzi (edges), gdzie każdy węzeł reprezentuje test na jednej zmiennych (cech), a każda krawędź reprezentuje wynik tego testu (np. tak lub nie).
+
+2.  **Decyzje Podejmowane Sekwencyjnie:** Model podejmuje decyzje sekwencyjnie, przechodząc od korzenia drzewa (root node) do liści (leaf nodes) na podstawie testów na kolejnych zmiennych. Każdy liść reprezentuje końcową decyzję (klasę) dla danego przypadku.
+
+3.  **Podział na Podzbiory:** Podczas treningu drzewo decyzyjne dzieli dane na podzbiory na podstawie cech, dążąc do maksymalizacji jednolitości (czystości) grup w każdym węźle.
+
+4.  **Prosta Interpretacja:** Drzewa decyzyjne są łatwe do zrozumienia i interpretacji, ponieważ można prześledzić logiczne kroki podejmowania decyzji od korzenia do liści.
+
+5.  **Odporność na Szumy:** Drzewa decyzyjne mogą być podatne na przeuczenie (overfitting), ale można to kontrolować poprzez odpowiednie parametryzowanie (np. maksymalna głębokość drzewa).
+
+6.  **Wykorzystanie w Klasyfikacji i Regresji:** Drzewa decyzyjne mogą być stosowane zarówno do problemów klasyfikacji (gdzie przewiduje się kategorie) jak i regresji (gdzie przewiduje się wartości ciągłe).
+
+**Drzewa decyzyjne** są używane w wielu dziedzinach, ze względu na swoją prostotę i intuicyjność.
+
+### **Definicja modelu drzewa decyzyjnego**
+
+```{r}
+dt <- decision_tree(cost_complexity = tune(),
+                    tree_depth = tune(),
+                    min_n = tune()) %>% 
+  set_engine("rpart") %>% 
+  set_mode("classification")
+```
+
+-   **`decision_tree(...)`**: Definiuje model drzewa decyzyjnego do strojenia.
+
+-   **`set_engine("rpart")`**: Wybiera silnik **`rpart`** do użycia w modelu.
+
+-   **`set_mode("classification")`**: Określa tryb działania modelu jako klasyfikacja.
+
+### **Budowa workflow dla modelu**
+
+```{r}
+dt_wf <- workflow() %>% 
+  add_model(dt) %>% 
+  add_recipe(rec)
+```
+
+-   **`workflow()`**: Inicjuje strukturę workflow dla łączenia modelu i recepty.
+
+-   **`add_model(dt)`**: Dodaje model **`dt`** do workflow.
+
+-   **`add_recipe(rec)`**: Dodaje receptę **`rec`** do workflow.
+
+### **Definicja metryk i procedura walidacji krzyżowej**
+
+```{r}
+res <- vfold_cv(train,v=5)
+
+params <- extract_parameter_set_dials(dt)
+params <- finalize(params,train)
+grid <- grid_latin_hypercube(params,size=10)
+m <- metric_set(f_meas,roc_auc,accuracy,j_index)
+```
+
+-   **`vfold_cv(train, v = 5)`**: Tworzy procedurę walidacji krzyżowej (cross-validation) z użyciem **5-krotnej walidacji** (v = 5). Procedura ta dzieli zbiór treningowy (train) na 5 podzbiorów, które zostaną użyte do oceny modelu.
+
+-   **`extract_parameter_set_dials(dt)`**: Wydobywa z modelu **`dt`** zestaw parametrów, które mogą być strojone podczas procesu optymalizacji hiperparametrów.
+
+    **`finalize(params, train)`**: Dopasowuje zestaw parametrów **`params`** do danych treningowych (**`train`**). W ten sposób przygotowuje zestaw parametrów do użycia w procesie strojenia.
+
+-   **`grid_latin_hypercube(params, size = 10)`**: Tworzy siatkę hiperparametrów do strojenia, wykorzystując technikę Latin Hypercube Sampling. Parametry **`params`** definiują zestaw strojonych parametrów, a **`size = 10`** oznacza liczbę próbek do wygenerowania w siatce.
+
+-   **`metric_set(...)`**: Definiuje zestaw metryk do oceny modelu.
+
+    -   **F1 Score(`f_meas`)**: Mierzy harmoniczną średnią precyzji i czułości; jest używany do oceny wyważenia między identyfikacją pozytywnych przypadków a minimalizacją fałszywych wyników.
+
+    -   **ROC AUC (`roc_auc`)**: Ocena zdolności modelu do rozróżniania klas na podstawie krzywej ROC; im wyższa wartość, tym lepsza zdolność modelu do rozróżniania klas.
+
+    -   **Dokładność (`accuracy`)**: Procent poprawnie sklasyfikowanych przypadków; ogólna miara skuteczności modelu w klasyfikacji.
+
+    -   **Indeks Jaccarda (`j_index`)**: Mierzy stopień pokrycia między predykcjami a rzeczywistymi etykietami; wyraża stosunek przecięcia zbiorów predykcji i prawdziwych etykiet do ich sumy.
+
+### **Strojenie hiperparametrów modelu**
+
+```{r}
+registerDoParallel(cores = 4)
+
+dt_res <- 
+  dt_wf %>% 
+  tune_grid(
+    resamples = res,
+    grid = grid,
+    metrics = m)
+
+dt_res %>% 
+  collect_metrics() %>% 
+  flextable()
+```
+
+-   **`registerDoParallel(cores = 4)`**: Ustawia wielowątkowość (parallel processing) dla obliczeń.
+
+-   **`tune_grid(...)`**: Stosuje procedurę strojenia grid
+
+```{r}
+dt_res %>% 
+  show_best("roc_auc")
+```
+
+-   **`dt_res`**: Jest to obiekt zawierający wyniki strojenia hiperparametrów dla modelu.
+
+-   **`show_best("roc_auc")`**: Funkcja ta zwraca najlepszy zestaw parametrów, który osiągnął najwyższy wynik ROC AUC podczas procesu strojenia.
+
+### **Wybór najlepszych Parametów**
+
+```{r}
+dt_best_param <- select_best(dt_res,"roc_auc")
+dt_best_param
+```
+
+-   **`select_best(dt_res, "roc_auc")`**: Wybiera najlepszy zestaw parametrów modelu na podstawie metryki ROC AUC z wyników strojenia zawartych w **`dt_res`**.
+
+### **Tworzenie zfinalizowanego przepływu pracy**
+
+```{r}
+#dorzucenie najlepszego 
+dt_final <- dt_wf %>% 
+  finalize_workflow(dt_best_param)
+
+
+dt_fit <- dt_final %>% 
+  fit(data=train)
+```
+
+-   **`finalize_workflow(dt_best_param)`**: Finalizuje przepływ pracy, aplikując najlepszy zestaw parametrów **`dt_best_param`** do modelu **`dt_wf`**.
+
+-   **`fit(data=train)`**: Dopasowuje zfinalizowany przepływ pracy **`dt_final`** do danych treningowych **`train`**, ucząc model na tych danych.
+
+### **Prognozowanie na danych testowych i ocena modelu**
+
+```{r}
+pred_dt <- predict(dt_fit,new_data = test)
+pred_dt2 <- cbind(test,pred_dt)
+
+```
+
+-   **`predict(dt_fit, new_data = test)`**: Dokonuje prognoz na danych testowych **`test`** przy użyciu dopasowanego modelu **`dt_fit`**.
+
+-   **`cbind(test, pred_dt)`**: Łączy dane testowe **`test`** z prognozami **`pred_dt`**, tworząc ramkę danych **`pred_dt2`**.
+
+```{r}
+tab3 <-confusionMatrix (data=pred_dt2$.pred_class, reference = pred_dt2$Tit)
+tab3$table
+```
+
+-   **`confusionMatrix()`**: Tworzy macierz pomyłek (**confusion matrix**) na podstawie danych prognozowych **`pred_dt2`** oraz prawdziwych wartości **`Tit`**, oceniając klasyfikację na podstawie przewidywanych klas **`.pred_class`**.
+
+W tej macierzy:
+
+-   Wiersze reprezentują przewidywane klasy (`Prediction`).
+
+-   Kolumny reprezentują rzeczywiste klasy (`Refence`).
+
+-   Wartości w macierzy to liczba przypadków, które zostały zaklasyfikowane do danej kombinacji przewidywanej i rzeczywistej klasy.
+
+Na przykład:
+
+-   **`510`** przypadków zostało zaklasyfikowanych jako **`CM`** (Prediction) i rzeczywiście należały do klasy **`CM`** (Truth).
+
+-   **`337`** przypadków zostało zaklasyfikowanych jako **`FM`** (Prediction), ale rzeczywiście należały do klasy **`IM`** (Truth).
+
+### **Obliczanie dokładności (Accuracy) na podstawie macierzy pomyłek**
+
+```{r}
+accuracy_tab3 <- round(sum(diag(tab3$table))/sum(tab3$table)*100,1)
+accuracy_tab3
+```
+
+To wyrażenie oblicza procent poprawnych klasyfikacji (accuracy) na podstawie macierzy pomyłek **`tab3`**. Wartość **`accuracy_tab3`** to procent przypadków, które zostały poprawnie sklasyfikowane przez model.
+
+Wynik dokładności (accuracy) wynosi $78.2\%$ co oznacza, że model poprawnie sklasyfikował $78.2 \%$ wszystkich przypadków na podstawie danych testowych. Wartość ta informuje o ogólnej skuteczności modelu w przewidywaniu odpowiednich klas.
+
+```{r}
+tab3$overall
+```
+
+### **Ogólne statystyki**
+
+-   **Accuracy (Dokładność)**: 0.7826836
+
+    -   Dokładność wskazuje, jaki odsetek wszystkich przewidywań modelu jest poprawnych. Wartość **0.7826836** oznacza, że model poprawnie sklasyfikował **78.27%** przypadków.
+
+-   **Kappa**: 0.7070918
+
+    -   Statystyka Kappa mierzy zgodność między przewidywaniami modelu a rzeczywistymi etykietami, uwzględniając przypadkowe trafienia. Wartość **0.7070918** wskazuje na dobrą zgodność.
+
+-   **AccuracyLower (Dolny przedział ufności dokładności)**: 0.7723630
+
+    -   Dolny limit przedziału ufności dla dokładności, który wynosi **0.7723630**, oznacza, że z **95%** pewnością dokładność modelu jest nie mniejsza niż **77.24%**.
+
+-   **AccuracyUpper (Górny przedział ufności dokładności)**: 0.7927454
+
+    -   Górny limit przedziału ufności dla dokładności, który wynosi **0.7927454**, oznacza, że z **95%** pewnością dokładność modelu jest nie większa niż **79.27%**.
+
+-   **AccuracyNull**: 0.4163144
+
+    -   Jest to dokładność, jaką osiągnąłby model, gdyby przewidywał najczęściej występującą klasę we wszystkich przypadkach. Wartość **0.4163144** oznacza, że taki model miałby dokładność **41.63%**.
+
+-   **AccuracyPValue**: 0.0000000
+
+    -   P-wartość testu statystycznego, która sprawdza, czy dokładność modelu jest znacząco wyższa niż dokładność modelu losowego (null model). P-wartość **0.0000000** wskazuje, że różnica jest statystycznie istotna na poziomie istotności **0.05**.
+
+-   **McnemarPValue**: NaN
+
+    -   P-wartość testu McNemara, który ocenia symetrię błędów klasyfikacji dwóch modeli. Wartość **NaN** wskazuje, że test nie mógł zostać przeprowadzony z powodu braku odpowiednich danych lub liczby próbki.
+
+#### 
+
+Model osiągnął wysoką dokładność **78.27%** oraz dobrą zgodność zgodnie ze statystyką Kappa **0.7071**. Wyniki te wskazują, że model jest skuteczny w klasyfikacji danych.Przedziały ufności dla dokładności dodatkowo potwierdzają wiarygodność wyników.
+
+## **Las losowy (Random Forest)**
+
+![Las Losowy](las_losowy.png){fig-align="center" width="400"}
+
+**Las Losowy (Random Forest)** jest popularnym algorytmem uczenia maszynowego, wykorzystującym zasadę ensemble learning.
+
+**Oto kluczowe cechy Lasu Losowego:**
+
+1.  **Zasada Ensemble Learning:** Las Losowy polega na tworzeniu wielu drzew decyzyjnych (lasy), które działają niezależnie i łączą się w celu uzyskania końcowej prognozy. Każde drzewo jest trenowane na innym podzbiorze danych (bagging) i losowo wybiera podzbiory funkcji (feature bagging).
+
+2.  **Redukcja Wariancji:** Las Losowy zmniejsza ryzyko przeuczenia (overfitting) poprzez losowe wybieranie próbek i cech do trenowania każdego drzewa, a następnie agreguje prognozy z wielu drzew w celu uzyskania stabilnej i dokładnej prognozy.
+
+3.  **Odporność na Szumy:** Dzięki agregacji wielu drzew, Las Losowy jest odporny na szumy i przypadkowe błędy w danych, co prowadzi do bardziej niezawodnych prognoz.
+
+4.  **Interpretowalność:** Las Losowy pozwala ocenić znaczenie poszczególnych cech w modelu, umożliwiając lepsze zrozumienie, które zmienne mają największy wpływ na prognozy.
+
+5.  **Skalowalność:** Las Losowy jest łatwy w użyciu i skalowalny, co czyni go odpowiednim do zastosowań w różnych dziedzinach i dla różnych typów danych.
+
+6.  **Elastyczność i popularność:** Las Losowy jest popularnym algorytmem w dziedzinie uczenia maszynowego, ze względu na swoją skuteczność, prostotę implementacji i wszechstronność. Jest szeroko stosowany w praktyce, zarówno w konkursach, jak i w produkcji.
+
+**Las Losowy** jest silnym narzędziem do klasyfikacji i regresji, wykorzystującym zasadę ensemble learning do uzyskania dokładnych i stabilnych prognoz. To jedna z najbardziej wykorzystywanych metod uczenia maszynowego w dzisiejszych zastosowaniach.
+
+### **Definicja modelu lasu losowego**
+
+```{r}
+rf  <- rand_forest(mtry = tune(),
+                    trees = tune(),
+                    min_n = tune()) %>% 
+    set_mode("classification") %>% 
+  set_engine("ranger")
+```
+
+### **Budowa workflow dla modelu**
+
+```{r}
+rf_wf <- workflow() %>% 
+  add_model(rf) %>% 
+  add_recipe(rec)
+```
+
+### **Definicja metryk i procedura walidacji krzyżowej**
+
+```{r}
+res <- vfold_cv(train,v=5)
+
+params <- extract_parameter_set_dials(rf)
+params <- finalize(params,train)
+grid <- grid_latin_hypercube(params,size=10)
+m <- metric_set(f_meas,roc_auc,accuracy,j_index)
+```
+
+### **Strojenie hiperparametrów modelu**
+
+```{r}
+registerDoParallel(cores = 4)
+
+rf_res <- 
+  rf_wf %>% 
+  tune_grid(
+    resamples = res,
+    grid = grid,
+    metrics = m)
+
+rf_res %>% 
+  collect_metrics() %>% 
+  flextable()
+```
+
+### **Wybór najlepszych Parametrów**
+
+```{r}
+rf_res %>% 
+  show_best("roc_auc")
+```
+
+```{r}
+rf_best_param <- select_best(rf_res,"roc_auc")
+rf_best_param
+```
+
+### **Tworzenie zfinalizowanego przepływu pracy**
+
+```{r}
+ 
+rf_final <- rf_wf %>% 
+  finalize_workflow(rf_best_param)
+
+
+rf_fit <- rf_final %>% 
+  fit(data=train)
+```
+
+### **Prognozowanie na danych testowych i ocena modelu**
+
+```{r}
+pred_rf <- predict(rf_fit,new_data = test)
+pred_rf2 <- cbind(test,pred_rf)
+
+```
+
+```{r}
+tab4 <-confusionMatrix (data=pred_rf2$.pred_class, reference = pred_rf2$Tit)
+tab4$table
+```
+
+### **Obliczanie dokładności (Accuracy) na podstawie macierzy pomyłek**
+
+```{r}
+accuracy_tab4 <-   round(sum(diag(tab4$table))/sum(tab4$table)*100,1)
+accuracy_tab4
+```
+
+-   Dokładność wynosi **79.1%**. Oznacza to, że model lasu losowego poprawnie sklasyfikował **79.1%** wszystkich przypadków na zbiorze testowym. Jest to ogólna miara skuteczności modelu w przewidywaniu odpowiednich klas na podstawie danych testowych.
+
+## **XGBoost**
+
+**XGBoost** (Extreme Gradient Boosting) to potężna biblioteka do uczenia maszynowego, znana ze swojej wydajności i skuteczności w rozwiązywaniu problemów regresji, klasyfikacji i rankingowania. Oto kilka kluczowych cech **XGBoost**:
+
+1.  **Gradient Boosting:** XGBoost opiera się na metodzie gradientowego wzmacniania (gradient boosting), która polega na sekwencyjnym budowaniu słabych modeli uczących (zwykle drzew decyzyjnych) i adaptacyjnym dostosowywaniu wag na podstawie błędów poprzednich modeli.
+
+2.  **Regularyzacja:** XGBoost zawiera mechanizmy do kontroli przeuczenia (overfitting), takie jak regularyzacja L1 i L2 oraz minimalizacja funkcji kosztu.
+
+3.  **Optymalizacja:** XGBoost wykorzystuje optymalizację gradientową do efektywnego trenowania modeli, co pozwala na szybkie dopasowywanie parametrów i minimalizację funkcji straty.
+
+4.  **Obsługa wielu typów danych:** XGBoost obsługuje różnorodne typy danych, w tym dane numeryczne i kategoryczne, co pozwala na elastyczne wykorzystanie w różnych problemach.
+
+5.  **Wyjątkowa wydajność:** XGBoost jest bardzo wydajny dzięki zoptymalizowanej implementacji, obsłudze równoległej obliczeń i możliwości wykorzystania procesorów graficznych (GPU) do przyspieszenia uczenia.
+
+6.  **Popularność i wsparcie:** XGBoost jest popularny w społeczności uczenia maszynowego ze względu na swoją skuteczność i wsparcie przez społeczność open-source. Oferuje także bogatą dokumentację i szeroki zakres zastosowań od konkursów Kaggle po produkcję.
+
+XGBoost jest jednym z najczęściej używanych algorytmów w dziedzinie uczenia maszynowego i często stanowi punkt odniesienia w rozwiązywaniu zaawansowanych problemów przewidywania.
+
+### **Definicja modelu XGBoost**
+
+```{r}
+XGB <- boost_tree(
+  trees = tune(),
+  min_n = tune(),
+  tree_depth = tune(),
+  learn_rate = tune(),
+  loss_reduction = tune()
+  ) %>% 
+  set_engine("xgboost") %>% 
+  set_mode("classification")
+```
+
+### **Budowa workflow dla modelu**
+
+```{r}
+
+XGB_wf <- workflow() %>% 
+  add_model(XGB) %>% 
+  add_recipe(rec)
+```
+
+### **Definicja metryk i procedura walidacji krzyżowej**
+
+```{r}
+res <- vfold_cv(train,v=5)
+
+params <- extract_parameter_set_dials(XGB)
+params <- finalize(params,train)
+grid <- grid_latin_hypercube(params,size=10)
+m <- metric_set(f_meas,roc_auc,accuracy,j_index)
+```
+
+### **Strojenie hiperparametrów modelu**
+
+```{r}
+
+
+registerDoParallel(cores = 4)
+
+XGB_res <- 
+  XGB_wf %>% 
+  tune_grid(
+    resamples = res,
+    grid = grid,
+    metrics = m)
+
+
+XGB_res %>% 
+  collect_metrics() %>% 
+  flextable()
+```
+
+### **Wybór najlepszych Parametrów**
+
+```{r}
+XGB_res %>% 
+  show_best("roc_auc")
+```
+
+```{r}
+XGB_best_param <- select_best(XGB_res,"roc_auc")
+```
+
+### **Tworzenie zfinalizowanego przepływu pracy**
+
+```{r}
+ 
+XGB_final <- XGB_wf %>% 
+  finalize_workflow(XGB_best_param)
+
+
+XGB_fit <- XGB_final %>% 
+  fit(data=train)
+
+```
+
+### **Prognozowanie na danych testowych i ocena modelu**
+
+```{r}
+pred_XGB <- predict(XGB_fit,new_data = test)
+pred_XGB2 <- cbind(test,pred_XGB)
+tab5 <-confusionMatrix (data=pred_XGB2$.pred_class, reference = pred_XGB2$Tit)
+tab5$table
+```
+
+### **Obliczanie dokładności (Accuracy) na podstawie macierzy pomyłek**
+
+```{r}
+accuracy_tab5 <- round(sum(diag(tab5$table))/sum(tab5$table)*100,1) 
+accuracy_tab5
+```
+
+-   Dokładność wynosi **79.4%**. Oznacza to, że model **XGBoost** poprawnie sklasyfikował **79.4%** wszystkich przypadków na zbiorze testowym. Jest to ogólna miara skuteczności modelu w przewidywaniu odpowiednich klas na podstawie danych testowych.
+
+## **K najbliższych sąsiadów (k-nearest neighbors)**
+
+![](KnnClassification.svg.png){fig-align="center" width="400"}
+
+**K najbliżsi sąsiedzi (k-nearest neighbors, kNN)** to prosty algorytm uczenia maszynowego wykorzystywany do klasyfikacji lub regresji. Jest to przykład algorytmu leniwego (lazy learning), który nie wymaga fazy treningu. Zamiast tego, kNN dokonuje prognoz na podstawie podobieństwa do najbliższych danych treningowych.
+
+### **Główne cechy kNN**
+
+1.  **Prostota:** Algorytm jest łatwy do zrozumienia i zaimplementowania.
+
+2.  **Brak uczenia:** kNN nie wymaga fazy treningowej, co pozwala na dynamiczną adaptację do danych.
+
+3.  **Podobieństwo:** Wykorzystuje miary odległości do określenia podobieństwa między obserwacjami.
+
+4.  **Wrażliwość na liczbę sąsiadów (k):** Wybór odpowiedniej liczby sąsiadów (k) ma wpływ na działanie algorytmu, np. mniejsze k może prowadzić do zwiększonej zmienności, a większe k do zwiększonego zrównoważenia.
+
+### **Obliczanie dokładności dla różnych wartości k (k-nearest neighbors)**
+
+```{r}
+acc <- function(pred, obs){
+    tab <- table(pred,obs)
+    acc <- sum(diag(prop.table(tab)))
+    acc
+}
+
+1:40 %>% 
+    map(~knn3(Tit~SRtng+RRtng+BRtng+Sex.x, data = train,, k = .x)) %>% 
+    map(~predict(.x, newdata = test, type = "class")) %>% 
+    map_dbl(~acc(pred = .x, obs = test$Tit)) %>% 
+    tibble(k = 1:length(.), acc=.) %>% 
+    ggplot(aes(k, acc))+
+     geom_line()
+```
+
+Kod przeprowadza analizę zmiany dokładności klasyfikacji dla algorytmu **k-nearest neighbors (kNN)** w zależności od liczby sąsiadów (**`k`**).
+
+Biorąc pod uwagę wykres można rozważać **12** lub **25** sąsiadów jako optymalne rozwiązanie, ponieważ wówczas poprawność klasyfikacji jest najwyższa.
+
+### **Definicja modelu K najbliższych sąsiadów dla k= 25**
+
+```{r}
+mod.knn_25 <- knn3(Tit~SRtng+RRtng+BRtng+Sex.x, data = train,
+                k = 25)
+mod.knn_25
+```
+
+### **Predykcja za pomocą modelu kNN (k = 25)**
+
+```{r}
+pred.knn.class_25 <- predict(mod.knn_25, newdata = test, type = "class")
+pred_sasiad <- cbind(test,pred.knn.class_25)
+names(pred_sasiad)[9] <- ".pred_class"
+```
+
+### **Macierz Pomyłek**
+
+```{r}
+
+
+
+
+tab6 <- confusionMatrix(data=pred_sasiad$.pred_class, reference = pred_sasiad$Tit)
+
+tab6$table
+```
+
+### **Obliczanie dokładności (Accuracy) na podstawie macierzy pomyłek**
+
+```{r}
+accuracy_tab6 <-  round(sum(diag(tab6$table))/sum(tab5$table)*100,1) 
+accuracy_tab6
+```
+
+-   Dokładność wynosi **70.3%**. Oznacza to, że model **K najbliższych sąsiadów** z parametrem `k` na poziomie **25** poprawnie sklasyfikował **70.3%** wszystkich przypadków na zbiorze testowym. Jest to ogólna miara skuteczności modelu w przewidywaniu odpowiednich klas na podstawie danych testowych.
+
+### **Definicja modelu K najbliższych sąsiadów dla K= 12**
+
+```{r}
+mod.knn_12 <- knn3(Tit~SRtng+RRtng+BRtng+Sex.x, data = train,
+                k = 12)
+mod.knn_12
+```
+
+### **Predykcja za pomocą modelu kNN (k = 12)**
+
+```{r}
+
+pred.knn.class_12 <- predict(mod.knn_12, newdata = test, type = "class")
+pred_sasiad2 <- cbind(test,pred.knn.class_12)
+names(pred_sasiad2)[9] <- ".pred_class"
+```
+
+### **Macierz Pomyłek**
+
+```{r}
+tab7<- confusionMatrix(data=pred_sasiad2$.pred_class, reference = pred_sasiad2$Tit)
+tab7$table
+```
+
+### **Obliczanie dokładności (Accuracy) na podstawie macierzy pomyłek**
+
+```{r}
+accuracy_tab7 <-  round(sum(diag(tab6$table))/sum(tab5$table)*100,1) 
+accuracy_tab7
+```
+
+-   Dokładność wynosi **70.01%.** To oznacza, że model **K najbliższych sąsiadów** z parametrem **k = 12** poprawnie sklasyfikował **70.01%** wszystkich przypadków na zbiorze testowym. Jest to ogólna miara skuteczności modelu w przewidywaniu właściwych klas na podstawie danych testowych.
+
+## **Metoda Wektorów Nośnych (Support Vector Machines - SVM)**
+
+![](SVM.png){fig-align="center" width="552"}
+
+**Metoda Wektorów Nośnych** **(SVM)** to popularna technika uczenia maszynowego stosowana do problemów klasyfikacji i regresji. **SVM** działa poprzez znalezienie hiperpłaszczyzny, która maksymalnie oddziela różne klasy w przestrzeni cech. W przypadku problemów nieliniowych, **SVM** używa funkcji jądrowych, które przekształcają dane do wyższych wymiarów, umożliwiając skuteczniejsze oddzielenie klas.
+
+### **Kluczowe zalety SVM:**
+
+1.  **Wysoka skuteczność** w klasyfikacji danych zarówno liniowych, jak i nieliniowych.
+
+2.  **Odporność na przetrenowanie**, szczególnie w przypadku dużych wymiarów przestrzeni cech.
+
+3.  **Elastyczność** dzięki różnym funkcjom jądrowym (np. liniowym, radialnym, wielomianowym).
+
+### **Definicja modelu Wektorów Nośnych**
+
+```{r}
+classifier = svm(formula =Tit~SRtng+RRtng+BRtng+Sex.x , 
+                 data = train, 
+                 type = 'C-classification', 
+                 kernel = 'linear')
+```
+
+### **Prognozowanie na danych testowych i ocena modelu**
+
+```{r}
+y_pred = predict(classifier, newdata = test,type = "class")
+pred_clasifier<- cbind(test,y_pred)
+names(pred_clasifier)[9] <- "Prediction"
+
+tab8 <- confusionMatrix(data=pred_clasifier$Prediction, reference = pred_clasifier$Tit)
+tab8$table
+```
+
+### **Obliczanie dokładności (Accuracy) na podstawie macierzy pomyłek**
+
+```{r}
+accuracy_tab8 <-  round(sum(diag(tab8$table))/sum(tab8$table)*100,1) 
+accuracy_tab8
+```
+
+Dokładność wynosi **75.3%**. Oznacza to, że model **SVM** poprawnie sklasyfikował **75.3%** wszystkich przypadków na zbiorze testowym. Jest to ogólna miara skuteczności modelu w przewidywaniu odpowiednich klas na podstawie danych testowych.
+
+### Podział danych na kobiety i mężczyzn
+
+```{r}
+palette <- scales::hue_pal()(8)
+
+dt.test_women <- subset(pred_clasifier, Sex.x == 'F')
+dt.test_men <- subset(pred_clasifier, Sex.x == 'M')
+
+```
+
+### **Trójwymiarowy wykres punktowy dla kobiet**
+
+```{r}
+plot_women <- ggplot(dt.test_women, aes(x = SRtng, y = RRtng, color = Prediction)) +
+  geom_point(aes(shape = Tit), size = 3) +
+  labs(title = "Klasyfikacja SVM: rzeczywiste tytuły vs przewidywane (Kobiety)",
+       x = "Standard Rating (SRtng)",
+       y = "Rapid Rating (RRtng)") +
+  scale_color_manual(values = palette) +
+  theme_minimal()
+
+ggplotly(plot_women)
+```
+
+Wykres przedstawia zależność między rzeczywistymi tytułami szachowymi a przewidywanymi przez model SVM dla zawodniczek (kobiet). Na wykresie każda kropka reprezentuje jednego zawodnika, z kolorami oznaczającymi przewidywane tytuły, a kształtami punktów oznaczającymi rzeczywiste tytuły. Osie przedstawiają trzy różne rankingi szachowe: **`Standard Rating (SRtng)`**, **`Rapid Rating (RRtng)`** i **`Blitz Rating (BRtng)`**. Wykres jest interaktywny, co pozwala na obracanie i przybliżanie.
+
+### **Trójwymiarowy wykres punktowy dla mężczyzn**
+
+```{r}
+plot_men <- ggplot(dt.test_men, aes(x = SRtng, y = RRtng, color = Prediction)) +
+  geom_point(aes(shape = Tit), size = 3) +
+  labs(title = "Klasyfikacja SVM: rzeczywiste tytuły vs przewidywane (Mężczyźni)",
+       x = "Standard Rating (SRtng)",
+       y = "Rapid Rating (RRtng)") +
+  scale_color_manual(values = palette) +
+  theme_minimal()
+
+ggplotly(plot_men)
+```
+
+Wykres przedstawia zależność między rzeczywistymi tytułami szachowymi a przewidywanymi przez model SVM dla zawodników (mężczyzn). Podobnie jak w przypadku wykresu dla kobiet, każda kropka reprezentuje jednego zawodnika, z kolorami oznaczającymi przewidywane tytuły, a kształtami punktów oznaczającymi rzeczywiste tytuły. Osie wykresu przedstawiają **`Standard Rating (SRtng)`**, **`Rapid Rating (RRtng)`** i **`Blitz Rating (BRtng)`**.
+
+## **Sieci Neuronowe(Neural Networks)**
+
+![](sieci_neuronowe_aktywne.gif){fig-align="center"}
+
+**Sieci neuronowe** to zaawansowane modele obliczeniowe inspirowane strukturą i funkcjonowaniem ludzkiego mózgu. Składają się z neuronów (węzłów), które są połączone warstwami: wejściową, ukrytymi i wyjściową. Każdy neuron przetwarza sygnał wejściowy, przekształca go za pomocą wag i funkcji aktywacji, a następnie przekazuje do neuronów w kolejnej warstwie.
+
+**Cechy sieci neuronowych:**
+
+-   **Warstwy**: Sieci neuronowe składają się z wielu warstw. Warstwa wejściowa odbiera surowe dane, warstwy ukryte przetwarzają je, a warstwa wyjściowa generuje wynik.
+
+-   **Wagi i przekształcenia**: Połączenia między neuronami mają przypisane wagi, które są modyfikowane podczas procesu uczenia. Neurony stosują funkcje aktywacji, takie jak ReLU czy sigmoida, aby wprowadzić nieliniowości do modelu.
+
+-   **Uczenie**: Proces uczenia polega na dostosowywaniu wag na podstawie błędu pomiędzy przewidywaniami sieci a rzeczywistymi wartościami, przy użyciu algorytmów takich jak wsteczna propagacja i optymalizatory.
+
+### **Konwersja Kolumny `Sex.x` na Wartości Numeryczne**
+
+```{r}
+train$Sex.y <- ifelse(train$Sex.x == "M", 0, 1)
+test$Sex.y <- ifelse(test$Sex.x == "M", 0, 1)
+```
+
+Na początku, kolumna **`Sex.x`** w zbiorze danych **`train`** i **`test`**, która zawiera wartości **`M`** lub **`F`** , jest przekształcana na wartości numeryczne **0** (mężczyzna) i **1** (kobieta). Ta konwersja jest konieczna, ponieważ modele sieci neuronowych w R wymagają danych numerycznych do trenowania.
+
+### **Definicja Siatki Hiperparametrów**
+
+```{r}
+
+
+grid <- expand.grid(
+  size = c(1,2,3,4,10, 20,30,40,60,100),    
+  decay = c(3,2,1,0.1, 0.01,0.001)  
+)
+
+```
+
+Zdefiniowanie siatki hiperparametrów, które będą testowane w celu znalezienia najlepszych ustawień dla modelu. **`size`** odnosi się do liczby neuronów w warstwie ukrytej, a **`decay`** to współczynnik regularyzacji, który pomaga zapobiegać przeuczeniu.
+
+### **Definicja Kontrolera Treningu**
+
+```{r}
+ctrl <- trainControl(method = "cv", number = 10)
+```
+
+Zastosowanie 10-krotnej walidacji krzyżowej, co pozwala na ocenę modelu na różnych podzbiorach danych treningowych i zapewnia lepszą ocenę jego wydajności.
+
+### **Strojenie Modelu z Wykorzystaniem Grid Search**
+
+```{r}
+set.seed(2024) 
+registerDoParallel(cores = 4)
+model <- train(
+  Tit ~ SRtng + RRtng + BRtng + Sex.y,
+  data = train,
+  method = "pcaNNet",
+  trControl = ctrl,
+  tuneGrid = grid,
+  MaxNWts = 3000,
+  trace = TRUE
+)
+
+```
+
+Korzystanie z funkcji **`train`** z pakietu **`caret`** do strojenia modelu sieci neuronowej. Model jest trenowany na podstawie zmiennych predykcyjnych **`SRtng`**, **`RRtng`**, **`BRtng`** oraz **`Sex.y`**. Używana metoda to **`pcaNNet`**, co oznacza, że model będzie używać analizy głównych składowych (PCA) przed zastosowaniem sieci neuronowej. Parametr **`MaxNWts`** ustawiony na 3000 określa maksymalną liczbę wag w sieci neuronowej, co jest konieczne dla większych sieci. Parametr **`trace`** ustawiony na **`TRUE`** umożliwia śledzenie procesu trenowania modelu.
+
+### **Wyniki walidacji krzyżowej dla różnych kombinacji hiperparametrów**
+
+```{r}
+print(model)
+```
+
+### 
+
+Najlepsze wyniki osiągnięto dla liczby jednostek ukrytych wynoszącej **10** oraz współczynnika weight decay równego **1**. Optymalne parametry modelu to: **size = 10** i **decay = 1**.
+
+### **Wykres procesu nauki**
+
+Aby zwizualizować proces nauki modelu, przedstawiono wykres zależności dokładności od liczby jednostek ukrytych oraz współczynnika weight decay:
+
+```{r}
+plot(model)
+```
+
+1.  **Weight Decay 0.01 i 0.1**:
+
+    -   Najwyższa dokładność przy niskich i średnich liczbach jednostek ukrytych (do około 10-20 jednostek).
+
+    -   Stabilność dokładności po przekroczeniu pewnej liczby jednostek ukrytych.
+
+2.  **Weight Decay 1, 2, i 3**:
+
+    -   Wyższe wartości współczynnika szybkości uczenia wykazują podobny trend, ale dokładność jest nieco niższa niż przy niższych wartościach (0.01 i 0.1).
+
+    -   Weight Decay 3 pokazuje stabilność na niższym poziomie dokładności.
+
+3.  **Weight Decay 0.001**:
+
+    -   Znacznie niższa dokładność, szczególnie przy większych liczbach jednostek ukrytych.
+
+4.  **Optymalne Hiperparametry**:
+
+    -   Najlepsze rezultaty dla współczynnika Weight Decay 0.1 i 0.01 oraz liczby jednostek ukrytych w zakresie od 10 do 20.
+
+### **Prognozowanie na danych testowych i ocena modelu**
+
+```{r}
+pred_siec <- predict(model,newdata = test)
+pred_siec2 <- cbind(test,pred_siec)
+names(pred_siec2)[10] <- ".pred_class"
+```
+
+```{r}
+tab9 <- confusionMatrix(data=pred_siec2$.pred_class, reference = pred_siec2$Tit)
+tab9$table
+```
+
+### **Obliczanie dokładności (Accuracy) na podstawie macierzy pomyłek**
+
+```{r}
+accuracy_tab9 <-  round(sum(diag(tab9$table))/sum(tab9$table)*100,1) 
+accuracy_tab9
+```
+
+Dokładność wynosi 76.1%. Oznacza to, że model sieci neuronowej poprawnie sklasyfikował 76.1% wszystkich przypadków na zbiorze testowym. Jest to ogólna miara skuteczności modelu w przewidywaniu odpowiednich klas na podstawie danych testowych.
+
+# **Porównanie modeli**
+
+```{r}
+Modele <- c("Drzewo decyzyjne(rpart) przed przycięciem", "Drzewo decyzyjne(rpart) po przycięciu","Drzewo decyzyjne(parsnip)", "Las losowy", "XGBoost", "K-najbliższych sąsiadów k=25", "K-najbliższych sąsiadów k=12","Metoda wektorów nośnych","Sieć neuronowa")
+Dokładność <- round(c(accuracy_tab,accuracy_tab2,accuracy_tab3,accuracy_tab4,accuracy_tab5,accuracy_tab6,accuracy_tab7,accuracy_tab8,accuracy_tab9),2)
+```
+
+```{r}
+df <- tibble(
+  Modele,Dokładność
+)
+df
+```
+
+```{r}
+lol <- ggplot(df, aes(x = Modele, y = Dokładność, fill = Modele)) +
+  geom_bar(stat = "identity") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = "Modele", y = "Dokładność", fill = "Modele") +
+  ggtitle("Porównanie dokładności różnych modeli")
+ggplotly(lol)
+```
+
+1.  **Drzewo decyzyjne (rpart) przed przycięciem**: Model osiągnął dokładność na poziomie **75.10%**. Oznacza to, że **75.10%** przypadków zostało poprawnie sklasyfikowanych na zbiorze testowym przed przycięciem drzewa decyzyjnego.
+
+2.  **Drzewo decyzyjne (rpart) po przycięciu**: Po zastosowaniu przycięcia, dokładność tego modelu nie zmieniła sie i dalej była na poziomie **75.10%**. Model ten poprawnie sklasyfikował **75.10%** przypadków na zbiorze testowym.
+
+3.  **Drzewo decyzyjne (parsnip)**: Model z użyciem parsnip uzyskał dokładność na poziomie **78.30%**. Oznacza to, że **78.30%** przypadków zostało poprawnie sklasyfikowanych przez ten model.
+
+4.  **Las losowy**: Model lasu losowego uzyskał dokładność na poziomie **79.10%**. **79.10%** przypadków zostało poprawnie sklasyfikowanych przez ten model na zbiorze testowym.
+
+5.  **XGBoost**: Model XGBoost osiągnął najwyższą dokładność w tej tabeli, wynoszącą **79.40%**. Model ten poprawnie sklasyfikował **79.40%** przypadków na zbiorze testowym.
+
+6.  **K-najbliżsi sąsiedzi k=25**: Model K-najbliższych sąsiadów z parametrem `k=25` uzyskał dokładność na poziomie **70.4%**. Oznacza to, że **70.4%** przypadków zostało poprawnie sklasyfikowanych przez ten model.
+
+7.  **K-najbliżsi sąsiedzi k=12**: Model K-najbliższych sąsiadów z parametrem `k=12` osiągnął dokładność na poziomie **70.02%**. Model ten poprawnie sklasyfikował **70.02%** przypadków na zbiorze testowym.
+
+8.  **Metoda wektorów nośnych (SVM)**: Model SVM uzyskał dokładność na poziomie **75.30%**. Oznacza to, że **75.30%** przypadków zostało poprawnie sklasyfikowanych przez ten model na zbiorze testowym.
+
+9.  **Sieć neuronowa**: Model sieci neuronowej uzyskał dokładność na poziomie **76.10%**. Oznacza to, że **76.10%** przypadków zostało poprawnie sklasyfikowanych przez ten model na zbiorze testowym.
+
+Najwyższą dokładność uzyskał model **XGBoost**, natomiast najniższą dokładność miał model **K-najbliżsi sąsiedzi k=12**:
+
+## **Metryki Klasyfikacji**
+
+```{r}
+ramka1 <- data.frame(tab$overall)
+ramka2 <-data.frame(tab2$overall)
+ramka3 <-data.frame(tab3$overall)
+ramka4 <-data.frame(tab4$overall)
+ramka5 <-data.frame(tab5$overall)
+ramka6 <-data.frame(tab6$overall)
+ramka7 <-data.frame(tab7$overall)
+ramka8 <-data.frame(tab8$overall)
+ramka9 <-data.frame(tab9$overall)
+```
+
+```{r}
+ramka <- cbind(ramka1,ramka2,ramka3,ramka4,ramka5,ramka6,ramka7,ramka8,ramka9)
+colnames(ramka)<- c("Drzewo decyzyjne(rpart) przed przycięciem", "Drzewo decyzyjne(rpart) po przycięciu","Drzewo decyzyjne(parsnip)", "Las losowy", "XGBoost", "K-najbliższych sąsiadów k=25", "K-najbliższych sąsiadów k=12","Metoda wektorów nośnych","Sieć neuronowa")
+ramka <- round(ramka,3)
+```
+
+### **Przekształcenie danych do formatu długiego**
+
+```{r}
+
+ramka_long <- ramka %>%
+  rownames_to_column(var = "Metric") %>%
+  pivot_longer(cols = -Metric, names_to = "Model", values_to = "Value")
+```
+
+## **Accuracy**
+
+```{r}
+plot_doklad <- ggplot(subset(ramka_long, Metric == "Accuracy"), aes(x = Model, y = Value, fill = Model)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Porównanie metryki: Accuracy",
+       x = "Model",
+       y = "Wartość",
+       fill = "Model") +
+  scale_fill_brewer(palette = "Set3")
+
+ggplotly(plot_doklad)
+```
+
+1.  **XGBoost** jest najskuteczniejszym modelem, osiągając najwyższą dokładność **0.794**. Model ten poprawnie sklasyfikował **79.4%** przypadków na zbiorze testowym.
+
+2.  **Las losowy** osiąga bardzo wysoką dokładność **0.791**, co czyni go solidnym wyborem dla tego zestawu danych.
+
+3.  **Drzewo decyzyjne (parsnip)** również uzyskuje wysoką dokładność **0.783**, co wskazuje na jego skuteczność w klasyfikacji danych.
+
+4.  **Sieć neuronowa** osiąga dokładność **0.761**, co pokazuje, że model ten dobrze radzi sobie z klasyfikacją danych, chociaż nie jest tak skuteczny jak XGBoost czy las losowy.
+
+5.  **Metoda wektorów nośnych (SVM)** uzyskuje dokładność **0.753**, co oznacza, że **75.3%** przypadków zostało poprawnie sklasyfikowanych przez ten model na zbiorze testowym.
+
+6.  **Drzewo decyzyjne (rpart) przed przycięciem** i **Drzewo decyzyjne (rpart) po przycięciu** mają identyczne wyniki dokładności na poziomie **0.751**. To wskazuje, że przycięcie drzewa decyzyjnego nie miało wpływu na dokładność modelu w tym przypadku.
+
+7.  **K-najbliższych sąsiadów k=25** ma dokładność **0.704**, co sugeruje, że ten algorytm jest mniej skuteczny dla tego zestawu danych.
+
+8.  **K-najbliższych sąsiadów k=12** uzyskuje nieco wyższą dokładność **0.705** w porównaniu do K-najbliższych sąsiadów **k=25**, ale nadal pozostaje na niższym poziomie w porównaniu do innych modeli.
+
+Analizując te wyniki, można zauważyć, że bardziej zaawansowane modele jak **XGBoost** i **las losowy** przynoszą lepsze wyniki w porównaniu do prostszych metod jak **K-najbliższych sąsiadów**. Dodatkowo, **sieci neuronowe** oraz **metoda wektorów nośnych** również pokazują dobrą skuteczność, choć nieco niższą od najlepszych modeli. **Drzewo decyzyjne** przed i po przycięciu pokazuje, że przycięcie nie miało znaczącego wpływu na dokładność modelu w tym przypadku.
+
+## **Kappa**
+
+```{r}
+plot_kappa <- ggplot(subset(ramka_long, Metric == "Kappa"), aes(x = Model, y = Value, fill = Model)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Porównanie metryki: Kappa",
+       x = "Model",
+       y = "Wartość",
+       fill = "Model") +
+  scale_fill_brewer(palette = "Set3")
+
+ggplotly(plot_kappa)
+```
+
+1.  **XGBoost** osiąga najwyższy współczynnik kappa spośród wszystkich modeli, wynoszący **0.724**.
+
+2.  **Las losowy** oraz **Drzewo decyzyjne (parsnip)** również uzyskują wysokie wartości współczynnika kappa, co czyni je solidnymi wyborami, z wynikami odpowiednio **0.720** i **0.707**.
+
+3.  **Metoda wektorów nośnych** oraz **Sieć neuronowa** również prezentują się obiecująco z wartościami współczynnika kappa wynoszącymi odpowiednio **0.673** i **0.684**.
+
+4.  **K-najbliżsi sąsiedzi** (zarówno z **k=25**, jak i **k=12**) mają niższe wartości współczynnika kappa w porównaniu do pozostałych modeli, sugerując, że ta metoda może być mniej skuteczna w porównaniu do innych, z wartościami współczynnika kappa odpowiednio **0.601** i **0.602**.
+
+5.  **Drzewo decyzyjne (rpart) przed i po przycięciu** wykazują podobne wartości współczynnika kappa, co wskazuje na brak znaczącego wpływu przycięcia w tym przypadku.
+
+Podsumowując, analiza współczynnika kappa potwierdza, że bardziej zaawansowane modele oraz nowoczesne techniki, takie jak **XGBoost**, **Metoda wektorów nośnych** oraz **Sieć neuronowa**, osiągają lepsze wyniki w porównaniu do prostszych metod, takich jak **k-najbliżsi sąsiedzi**.
+
+## **AccuracyLower**
+
+```{r}
+plot_lower <- ggplot(subset(ramka_long, Metric == "AccuracyLower"), aes(x = Model, y = Value, fill = Model)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Porównanie metryki: AccuracyLower",
+       x = "Model",
+       y = "Wartość",
+       fill = "Model") +
+  scale_fill_brewer(palette = "Set3")
+ggplotly(plot_lower)
+```
+
+1.  **XGBoost** wykazuje najwyższą dolną granicę przedziału ufności dla dokładności, osiągając **0.784**.
+
+2.  **Las losowy** oraz **Drzewo decyzyjne (parsnip)** również prezentują solidne osiągnięcia, z dolnymi granicami przedziału ufności odpowiednio **0.781** i **0.772**.
+
+3.  **Metoda wektorów nośnych** oraz **Sieć neuronowa** pokazują obiecujące wyniki z dolnymi granicami przedziału ufności na poziomie **0.742** i **0.750**.
+
+4.  **K-najbliżsi sąsiedzi** (zarówno z k=25, jak i k=12) mają niższe dolne granice przedziału ufności, co może sugerować mniejszą pewność w ich dokładności, z wynikami odpowiednio **0.693** i **0.693**.
+
+5.  **Drzewo decyzyjne (rpart) przed i po przycięciu** wykazują podobne dolne granice przedziału ufności, co sugeruje minimalny wpływ przycięcia na ich dokładność.
+
+Podsumowując, wyniki pokazują, że modele bardziej zaawansowane oraz nowoczesne techniki, takie jak **XGBoost**, **Metoda wektorów nośnych** oraz **Sieć neuronowa**, mają większą pewność w osiąganiu wysokich wyników w porównaniu do prostszych metod, jak **k-najbliżsi sąsiedzi**.
+
+## **AccuracyUpper**
+
+```{r}
+plot_upper <- ggplot(subset(ramka_long, Metric == "AccuracyUpper"), aes(x = Model, y = Value, fill = Model)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Porównanie metryki: AccuracyUpper",
+       x = "Model",
+       y = "Wartość",
+       fill = "Model") +
+  scale_fill_brewer(palette = "Set3")
+ggplotly(plot_upper)
+```
+
+1.  **XGBoost** wykazuje najwyższą górną granicę przedziału ufności dla dokładności, osiągając **0.804**.
+
+2.  **Las losowy** oraz **Drzewo decyzyjne (parsnip)** również prezentują solidne wyniki, z górnymi granicami przedziału ufności odpowiednio **0.801** i **0.793**.
+
+3.  **Metoda wektorów nośnych** oraz **Sieć neuronowa** wykazują obiecujące wyniki, z górnymi granicami przedziału ufności na poziomie **0.763** i **0.771**.
+
+4.  **K-najbliżsi sąsiedzi** (zarówno z **k=25,** jak i **k=12**) mają niższe górne granice przedziału ufności, co sugeruje mniejszą pewność w ich dokładności, z wynikami odpowiednio **0.716** i **0.716**.
+
+5.  **Drzewo decyzyjne (rpart) przed i po przycięciu** wykazują podobne górne granice przedziału ufności, co sugeruje minimalny wpływ przycięcia na ich dokładność.
+
+Podsumowując, wyniki pokazują, że modele bardziej zaawansowane oraz nowoczesne techniki, takie jak **XGBoost**, **Metoda wektorów nośnych** oraz **Sieć neuronowa**, mają większą pewność w osiąganiu wysokich wyników w porównaniu do prostszych metod, jak **k-najbliżsi sąsiedzi**.
+
+## **AccuracyNull**
+
+```{r}
+plot_null <- ggplot(subset(ramka_long, Metric == "AccuracyNull"), aes(x = Model, y = Value, fill = Model)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Porównanie metryki: AccuracyNull",
+       x = "Model",
+       y = "Wartość",
+       fill = "Model") +
+  scale_fill_brewer(palette = "Set3")
+
+ggplotly(plot_null)
+```
+
+Wszystkie modele mają identyczną dokładność wzorca niewystarczającego na poziomie **0.416**. Oznacza to, że jeśli model zawsze przewidywałby klasę dominującą w zbiorze danych, jego dokładność byłaby taka sama jak obserwowana dla tych modeli.
+
+## **AccuracyPValue**
+
+```{r}
+
+plot_p_value <- ggplot(subset(ramka_long, Metric == "AccuracyPValue"), aes(x = Model, y = Value, fill = Model)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Porównanie metryki: AccuracyPValue",
+       x = "Model",
+       y = "Wartość",
+       fill = "Model") +
+  scale_fill_brewer(palette = "Set3")
+ggplotly(plot_p_value)
+```
+
+Wszystkie modele mają `p-wartość` dokładności równą **0.000**, co oznacza, że istnieje istotna statystycznie różnica w dokładności między nimi. Dla każdego modelu różnice te są istotne i można je uznać za znaczące z punktu widzenia statystycznego.
+
+## **Wybór najlepszego modelu**
+
+Zestawienie wyników wskazuje na to, że model **XGBoost** osiągnął najwyższą dokładność (`Accuracy`) na poziomie **79.3%**, co świadczy o jego skuteczności w klasyfikacji. Ponadto, wartość współczynnika `Kappa` dla tego modelu wynosi **0.722**, co wskazuje na dobrą zgodność między rzeczywistymi a przewidywanymi klasami. Jeśli spojrzymy na inne miary, takie jak dolne ograniczenie dokładności `(AccuracyLower)` wynoszące **78.3%** i górne ograniczenie dokładności `(AccuracyUpper)` na poziomie **80.6%**, oraz niską wartość p dla dokładności `(AccuracyPValue)` równą **0.000**, potwierdzają one wysoką jakość predykcji modelu.
+
+Podsumowując, na podstawie analizy wyników możemy stwierdzić, że model **XGBoost** nadal jest najlepszym wyborem do przewidywania klas na podstawie dostępnych danych, zapewniając najwyższą dokładność i wysoką zgodność między przewidywanymi a rzeczywistymi klasami. Jednakże, warto również wziąć pod uwagę **Metodę wektorów nośnych** oraz **Sieć neuronową**, które również prezentują obiecujące wyniki i mogą być skutecznymi alternatywami, które warto rozważyć w zależności od specyfiki danych i wymagań zadania klasyfikacji.
